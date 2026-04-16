@@ -39,16 +39,79 @@ Phase 2: NARRATIVE (media-analyst)
    └─ Identify blind spots and apparent contradictions
    └─ Output: Media framing map
 
-Phase 3: THEORY (media-analyst → Theoretical Stress-Test)
-   └─ Take Phase 1's data as inputs
-   └─ Take Phase 2's framing as context
-   └─ Apply three theories, score against reality
-   └─ Identify convergence (high confidence) and divergence (genuine uncertainty)
-   └─ Output: Theoretical scorecard
+Phase 3: BRIDGE (media-analyst → Framing-to-FX)
+   └─ Map each outlet's frame to a capital pool, FX mechanism, BRL direction
+   └─ Build the Framing Risk Map table
+   └─ Check for convergence risk
+   └─ Output: Framing Risk Map
 
 Phase 4: ASSEMBLY
+   └─ Apply 3-point stress-test (Monetarist, Post-Keynesian, Structuralist)
+   └─ Build Forecast section (4 testable predictions)
+   └─ Build Review section (score prior forecasts or baseline consensus)
+   └─ Write Executive Brief LAST (summarizes all sections)
    └─ Merge all phases into the Combined Report Template below
+   └─ Output: Complete EN report (.md)
+
+Phase 5: PORTUGUESE TRANSLATION
+   └─ Translate the complete report into Brazilian Portuguese
+   └─ Apply locale formatting, Valor Econômico register
+   └─ Output: Complete PT report (.md)
+
+Phase 6: CROSS-REFERENCE CHECK
+   └─ Compare every numerical data point EN ↔ PT
+   └─ Flag substantive discrepancies (not locale formatting)
+   └─ Output: Verification table appended to EN report
+
+Phase 7: CLEAN MACHINE SPEAK (~/bin/clean-report.py)
+   └─ Strip any preamble or process narration before the first # heading
+   └─ Remove stray code fences, collapse excess whitespace
+   └─ Validate structural markers (EXECUTIVE BRIEF, SECTION 1, etc.)
+   └─ Fail loud on placeholder text or missing sections
+   └─ Output: Cleaned EN report (.md)
+
+Phase 8: SPLICE (~/bin/splice-report.sh)
+   └─ Extract signal line → signal_line.txt (BlueSky, ≤240 chars)
+   └─ Extract Executive Brief → exec_brief.md (email, full HTML)
+   └─ Build social teaser → exec_brief_social.txt (Mastodon, ≤400 chars)
+   └─ Copy full report → full_report.md (website, Substack)
+   └─ Output: Platform-specific slices in splice directory
+
+Phase 9: DISTRIBUTE
+   └─ 9a: Pandoc → HTML email of exec brief via msmtp (Proton Bridge)
+   └─ 9b: Git push full report to gh-pages (GitHub Pages — must go first)
+   └─ 9c: Wait 45s for Pages rebuild
+   └─ 9d: Post signal_line.txt to BlueSky (curl + app password)
+   └─ 9e: Post exec_brief_social.txt to Mastodon (curl + access token)
+   └─ 9f: Substack — manual for now (copy from archive, paste into editor)
+   └─ Each channel fails independently — one outage doesn't block the others
 ```
+
+---
+
+## Critical Output Rules (Phases 1–4)
+
+Claude's output MUST comply with these rules. They prevent machine-speak from
+leaking into the report and ensure the clean/splice pipeline works correctly.
+
+- The FIRST character of output must be "#" (the signal-line heading).
+- Do NOT include ANY preamble, process narration, or status updates.
+- FORBIDDEN PHRASES — output must NOT contain any of these, in any form:
+  * "Now assembling..." / "Let me assemble..." / "Now I'll write..."
+  * "I have/I now have the data..." / "I've gathered..." / "I've collected..."
+  * "All data collected..." / "Data gathering complete..."
+  * "Let me now..." / "I'll now..." / "Moving on to..."
+  * "Here is the briefing..." / "Below is the report..."
+  * "No prior editions found..." (this is a process observation, not report content)
+  * Any sentence that describes YOUR actions rather than the REPORT's content.
+- Transitioning from research to writing is INTERNAL. Do not narrate it.
+- Do NOT wrap the report in triple-backtick code fences.
+- Do NOT add commentary after the last section.
+- The report simply begins. There is no runway before it.
+
+These rules exist because Phase 7 (clean) strips everything before the first
+"# " heading. If the report starts correctly, the cleaner has nothing to do.
+If it doesn't, the cleaner catches it — but prevention is better than cleanup.
 
 ---
 
@@ -80,10 +143,16 @@ The final output has this structure. Every section is mandatory unless marked op
 > **[BRL BULLISH/BEARISH/MIXED] ([confidence]) @ [spot rate]** — [dominant force] — key risk: [risk] — next: [catalyst + date]
 
 One line. No clickbait. A PM glancing at their phone at 6am gets the entire thesis.
+This line also becomes the BlueSky post via the Phase 8 splicer.
 
 ---
 
 ## EXECUTIVE BRIEF (under 400 words for combined report)
+
+This section serves triple duty: (1) the email body, (2) the Mastodon teaser
+(first 1-2 sentences extracted by splicer), and (3) the in-report summary.
+Write the first two sentences to work as a standalone social post — they should
+convey the BRL thesis and dominant risk without context from the rest of the brief.
 
 ### Market Snapshot
 - BRL/USD: [spot] ([source, date, hyperlinked]) — [context]
@@ -381,17 +450,17 @@ If a URL cannot be confirmed during the session, use parenthetical format. Never
 - Produce positional readings for each outlet on each story
 - The "Apparent Contradictions" section is mandatory when data contradicts narrative
 
-### Phase 3: Theoretical Stress-Test
-- Use Phase 1's data set as inputs (list them explicitly in "Data Inputs")
-- Use Phase 2's framing map to contextualize — which theory's predictions align
-  with which outlet's framing?
-- Score honestly — if a theory fails to explain an indicator, say so
-- The "Where Theories Diverge" section is the most valuable part — it tells
-  the reader where genuine uncertainty lives
+### Phase 3: Framing-to-FX Bridge
+- Map each outlet's frame → capital pool → FX mechanism → BRL direction
+- Build the Framing Risk Map table
+- Check for convergence risk (all frames pointing same direction = contrarian risk)
 
 ### Phase 4: Assembly
-- Merge all phases into the Combined Report Template
-- Write the Executive Brief LAST — it summarizes all three parts
+- Apply 3-point stress-test using Phase 1 data + Phase 2 framing
+- Build Forecast section (4 testable predictions with diagnostic tests)
+- Build Review section (score prior forecasts or establish baseline)
+- Write the Executive Brief LAST — it summarizes all sections
+- First two sentences of the Executive Brief must work as a standalone social post
 - Final verification pass: re-read the entire report and confirm every number
   carries source + date, every factual claim meets two-source minimum
 
@@ -399,7 +468,7 @@ If a URL cannot be confirmed during the session, use parenthetical format. Never
 - Translate the complete report into Brazilian Portuguese
 - Apply Brazilian number formatting: decimal comma (4,997 not 4.997), period for
   thousands (1.112 bps not 1,112 bps), currency as R$ with comma decimal (R$59,8B)
-- Translate the Figure Provenance notation: ⟨derived:⟩ → ⟨derivado:⟩, 
+- Translate the Figure Provenance notation: ⟨derived:⟩ → ⟨derivado:⟩,
   ⟨estimated:⟩ → ⟨estimativa:⟩
 - Translate section headers but keep indicator names in their original form
   (SELIC, COPOM, FOMC, DXY, IBOVESPA, Focus stay untranslated — they are proper nouns)
@@ -422,13 +491,39 @@ If a URL cannot be confirmed during the session, use parenthetical format. Never
 - Report result: "X/Y data points verified. Discrepancies: [list or none]"
 - If any discrepancy is found, fix it in both versions before publishing
 
+### Phase 7: Clean Machine Speak (post-generation, automated)
+- Runs ~/bin/clean-report.py against the raw EN report
+- Strips everything before the first "# " heading (preamble, process narration)
+- Removes stray code fences, collapses excess whitespace
+- Validates expected sections exist (EXECUTIVE BRIEF, SECTION 1, SECTION 2, FORECAST)
+- Warns on placeholder text ([TBD], [INSERT], TODO:)
+- If clean fails, falls back to raw report with a warning in the log
+
+### Phase 8: Splice (post-clean, automated)
+- Runs ~/bin/splice-report.sh against the cleaned EN report
+- Extracts signal_line.txt (first # heading, stripped, ≤240 chars for BlueSky)
+- Extracts exec_brief.md (full Executive Brief section for email)
+- Builds exec_brief_social.txt (first 1-2 sentences, ≤400 chars for Mastodon)
+- Copies full_report.md (complete cleaned report for website and Substack)
+- All outputs go to a timestamped splice directory
+
+### Phase 9: Distribute (post-splice, automated)
+- 9a: Email — exec brief as HTML via Pandoc + msmtp through Proton Bridge
+- 9b: GitHub Pages — git push full report to gh-pages branch (goes FIRST so links are live)
+- 9c: Wait 45 seconds for GitHub Pages rebuild
+- 9d: BlueSky — post signal_line.txt + edition URL via API (app password auth)
+- 9e: Mastodon — post exec_brief_social.txt + edition URL via API (access token auth)
+- 9f: Substack — manual for now (copy from archive, paste into editor)
+- Each social channel fails independently and logs its own success/failure
+- Distribution order matters: website must be live before social posts go out
+
 ---
 
 ## Scope Calibration
 
 The full combined report is substantial. Calibrate depth to the user's request:
 
-- **"Full report" / "in-depth" / "comprehensive"** → All six phases, both languages
+- **"Full report" / "in-depth" / "comprehensive"** → All nine phases, both languages
 - **"Quick briefing" / "update"** → Executive Brief only + abbreviated Part 1 (EN only)
 - **"What's happening today"** → Executive Brief + Part 2 headlines only (EN only)
 - **"Should I buy dollars"** → Part 1 only (brl-usd-trader, EN only)

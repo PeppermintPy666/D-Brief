@@ -2,19 +2,28 @@
 
 ## Overview
 
-This guide documents the full process of setting up an automated daily briefing system that runs Claude Code skills on a schedule, generates an HTML-formatted report, and emails it via Proton Mail Bridge. The system runs on a Linux PC (Ubuntu/Debian) using cron for scheduling.
+This guide documents the full process of setting up an automated daily briefing system that runs Claude Code skills on a schedule, generates a report, cleans and slices it for multi-platform distribution, and publishes across email, GitHub Pages, BlueSky, and Mastodon. The system runs on a Linux PC (Ubuntu/Debian) using cron for scheduling.
 
 ### Architecture
 
 ```
 Cron (scheduled trigger)
-  → Bash script
-    → Claude Code CLI (`claude -p`) runs two skills:
-      1. brl-usd-trader (BRL/USD macro FX analysis)
-      2. media-analyst (multi-outlet news framing analysis)
-    → Pandoc converts combined Markdown to HTML
-    → msmtp sends HTML email through Proton Mail Bridge
-      → Bridge encrypts and delivers via Proton's servers
+  → Bash script (~/daily-report.sh)
+    → Claude Code CLI (claude -p) — 3 sequential calls:
+      Phase 1-4: Full English report generation (~3-5 min)
+      Phase 5:   Portuguese translation (~1-2 min)
+      Phase 6:   Cross-reference check (~30-60 sec)
+    → Clean (~/bin/clean-report.py)
+      Phase 7:   Strip preamble, validate structure
+    → Splice (~/bin/splice-report.sh)
+      Phase 8:   Extract signal line, exec brief, social teaser, full report
+    → Distribute
+      Phase 9a:  Pandoc → HTML email via msmtp (Proton Bridge)
+      Phase 9b:  Git push to GitHub Pages (must go first — links must be live)
+      Phase 9c:  Wait 45s for Pages rebuild
+      Phase 9d:  Post signal line to BlueSky (curl + app password)
+      Phase 9e:  Post exec brief teaser to Mastodon (curl + access token)
+      Phase 9f:  Substack — manual for now
 ```
 
 ### Prerequisites
@@ -22,7 +31,20 @@ Cron (scheduled trigger)
 - Linux PC (Ubuntu/Debian-based)
 - Paid Proton Mail account (required for Bridge)
 - Claude Pro or Max subscription (required for Claude Code)
-- Internet connection
+- BlueSky account (free, app password for API)
+- Mastodon account (any instance; access token via Settings → Development)
+- Internet connection (VPN-compatible — all services work behind VPN)
+
+### Dependencies to install
+
+- Node.js 22 via nvm (for Claude Code)
+- Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+- Pandoc (markdown → HTML)
+- msmtp + Proton Mail Bridge (email)
+- Git + GitHub Pages (archive)
+- GPG (encrypted credentials)
+- jq (JSON parsing for social API responses)
+- curl (social API calls)
 
 ---
 
@@ -99,7 +121,7 @@ This unpacks each skill into `~/.claude/skills/`, where Claude Code loads them a
 
 ```bash
 ls ~/.claude/skills/
-# Should show: brl-usd-trader/  media-analyst/
+# Should show: brl-usd-trader/  media-analyst/  daily-briefing/
 ```
 
 ### Grant web access permissions
@@ -265,117 +287,228 @@ Check your inbox — if you receive the email, the chain is working.
 
 ---
 
-## Phase 6 — Install Pandoc
+## Phase 6 — Install Pandoc and jq
 
-Pandoc converts Markdown to HTML for formatted emails.
+Pandoc converts Markdown to HTML for formatted emails and the GitHub Pages archive. jq parses JSON responses from the BlueSky and Mastodon APIs.
 
 ```bash
-sudo apt install pandoc
+sudo apt install pandoc jq
 ```
 
 ---
 
-## Phase 7 — Create the Daily Report Script
+## Phase 7 — Set Up Social Platform Credentials
 
-Save the following as `~/daily-report.sh`:
+All credentials are GPG-encrypted and stored in per-service directories with restricted permissions. This limits blast radius if any single credential leaks.
+
+### BlueSky
+
+1. Create an account at bsky.app (pseudonymous, VPN-friendly, no phone required)
+2. Settings → App Passwords → create one called "d-brief-bot"
+3. Store it:
+
+```bash
+mkdir -p ~/.config/bluesky && chmod 700 ~/.config/bluesky
+echo -n "YOUR_APP_PASSWORD" | gpg --encrypt --recipient YOUR_GPG_EMAIL -o ~/.config/bluesky/app-pass.gpg
+```
+
+4. Verify:
+
+```bash
+gpg --quiet --for-your-eyes-only --no-tty --decrypt ~/.config/bluesky/app-pass.gpg
+# Should print the app password
+```
+
+### Mastodon
+
+1. Create an account on your chosen instance (mastodon.social = 500 chars, journa.host = 2000 chars, etc.)
+2. Navigate to `https://YOUR-INSTANCE/settings/applications`
+3. New Application → name: "d-brief-bot" → scope: only `write:statuses` → Submit
+4. Click into the app → copy "Your access token" (the top value)
+5. Store it:
+
+```bash
+mkdir -p ~/.config/mastodon && chmod 700 ~/.config/mastodon
+echo -n "YOUR_ACCESS_TOKEN" | gpg --encrypt --recipient YOUR_GPG_EMAIL -o ~/.config/mastodon/token.gpg
+```
+
+6. Verify:
+
+```bash
+gpg --quiet --for-your-eyes-only --no-tty --decrypt ~/.config/mastodon/token.gpg
+# Should print the access token
+```
+
+**Security note:** If a token is ever exposed (e.g., pasted into a chat), rotate it immediately. BlueSky: delete and recreate the app password. Mastodon: regenerate the token in Settings → Development → your app.
+
+---
+
+## Phase 8 — Create the Processing Scripts
+
+These two scripts sit between report generation (Claude Code) and distribution. They clean Claude's raw output and slice it into platform-specific pieces.
+
+### Clean script (Phase 7 of the pipeline)
+
+```bash
+mkdir -p ~/bin
+nano ~/bin/clean-report.py
+```
+
+Contents:
+
+```python
+#!/usr/bin/env python3
+import sys, re, pathlib
+
+if len(sys.argv) != 2:
+    sys.stderr.write("Usage: clean-report.py <raw.md>\n")
+    sys.exit(1)
+
+raw = pathlib.Path(sys.argv[1]).read_text()
+original_len = len(raw)
+
+match = re.search(r"^#\s", raw, flags=re.MULTILINE)
+if not match:
+    sys.stderr.write("FATAL: no '# ' heading found in input\n")
+    sys.exit(1)
+
+stripped_bytes = match.start()
+cleaned = raw[match.start():]
+
+cleaned = re.sub(r"^```(?:markdown|md)?\s*\n", "", cleaned)
+cleaned = re.sub(r"\n```\s*$", "\n", cleaned)
+cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+for line in cleaned.splitlines()[:5]:
+    for pat in [r"^(I'll now|I now have|Let me |Now I'll|Now assembling|All data collected)",
+                r"^(No prior editions found)",
+                r"^(Here is (the|your) (briefing|report))"]:
+        if re.match(pat, line, flags=re.IGNORECASE):
+            sys.stderr.write(f"WARN: suspected leak in first 5 lines: {line[:80]}\n")
+
+missing = [s for s in ["EXECUTIVE BRIEF", "SECTION 1", "SECTION 2", "FORECAST"] if s not in cleaned]
+if missing:
+    sys.stderr.write(f"WARN: missing expected sections: {missing}\n")
+
+sys.stderr.write(f"Stripped {stripped_bytes} bytes of preamble. Original: {original_len}, Cleaned: {len(cleaned)}\n")
+sys.stdout.write(cleaned)
+```
+
+```bash
+chmod +x ~/bin/clean-report.py
+```
+
+### Splice script (Phase 8 of the pipeline)
+
+```bash
+nano ~/bin/splice-report.sh
+```
+
+Contents:
 
 ```bash
 #!/bin/bash
-# Daily BRL/USD + Media Analysis Report
-# Runs two Claude Code skills, converts to HTML, and emails the formatted report
-
 set -euo pipefail
 
-# --- Configuration ---
-EMAIL="YOUR_EMAIL@pm.me"
-REPORT_DIR="$HOME/daily-reports"
-DATE=$(date +%Y-%m-%d)
-TIME=$(date +%H%M)
-REPORT_FILE="$REPORT_DIR/report-$DATE-$TIME.md"
-HTML_FILE="$REPORT_DIR/report-$DATE-$TIME.html"
+CLEAN="$1"
+OUTDIR="$2"
+mkdir -p "$OUTDIR"
 
-# --- GPG agent setup (needed for non-interactive password decryption) ---
-export GPG_TTY=$(tty 2>/dev/null || echo "/dev/null")
-gpg-connect-agent updatestartuptty /bye >/dev/null 2>&1 || true
+# Signal line (BlueSky) — first heading, strip the #
+SIGNAL=$(head -5 "$CLEAN" | grep '^# ' | head -1 | sed 's/^# //')
+if [ ${#SIGNAL} -gt 240 ]; then
+    SIGNAL="${SIGNAL:0:237}..."
+fi
+echo "$SIGNAL" > "$OUTDIR/signal_line.txt"
 
-# Ensure report directory exists
-mkdir -p "$REPORT_DIR"
+# Executive Brief (full, for email)
+sed -n '/^## .*EXECUTIVE BRIEF/,/^## /{/^## /d;p}' \
+    "$CLEAN" > "$OUTDIR/exec_brief.md"
 
-# --- Generate Reports ---
-echo "[$(date)] Starting daily report generation..."
+# Mastodon teaser (max 400 chars, first 1-2 sentences)
+sed 's/\*\*//g; s/\*//g; s/\[//g; s/\]([^)]*)//g; /^$/d; /^---$/d' \
+    "$OUTDIR/exec_brief.md" \
+    | tr '\n' ' ' \
+    | grep -oP '^[^.]*\.[^.]*\.' \
+    > "$OUTDIR/exec_brief_social.txt"
 
-# BRL/USD Trading Analysis
-echo "[$(date)] Running BRL/USD analysis..."
-BRL_REPORT=$(claude -p "Using the brl-usd-trader skill: analyze BRL/USD exchange rate outlook for today. Cover the SELIC vs Fed Funds spread, DXY impact on the real, BCB vs Fed standpoints, capital flows between Brazil and the US, and flag risks that could invalidate the thesis." 2>/dev/null || echo "Error: BRL/USD analysis failed to generate.")
+CHAR_COUNT=$(wc -c < "$OUTDIR/exec_brief_social.txt")
+if [ "$CHAR_COUNT" -gt 400 ]; then
+    sed 's/\*\*//g; s/\*//g; s/\[//g; s/\]([^)]*)//g; /^$/d; /^---$/d' \
+        "$OUTDIR/exec_brief.md" \
+        | tr '\n' ' ' \
+        | grep -oP '^[^.]*\.' \
+        > "$OUTDIR/exec_brief_social.txt"
+fi
 
-# Media Analysis
-echo "[$(date)] Running media analysis..."
-MEDIA_REPORT=$(claude -p "Using the media-analyst skill: give me a comprehensive press review and media analysis of today's most significant global events. Compare how different outlets frame the key stories and what each outlet's perspective reveals or obscures." 2>/dev/null || echo "Error: Media analysis failed to generate.")
+# Full report
+cp "$CLEAN" "$OUTDIR/full_report.md"
 
-# --- Combine into Markdown ---
-cat > "$REPORT_FILE" << EOF
-# Daily Briefing — $DATE $(date +%H:%M)
-
----
-
-## BRL/USD Trading Analysis
-
-$BRL_REPORT
-
----
-
-## Media Analysis & News Digest
-
-$MEDIA_REPORT
-
----
-
-*Generated automatically at $(date "+%H:%M %Z")*
-EOF
-
-echo "[$(date)] Report saved to $REPORT_FILE"
-
-# --- Convert to HTML ---
-echo "[$(date)] Converting to HTML..."
-pandoc "$REPORT_FILE" -f markdown -t html --standalone \
-    --metadata title="Daily Briefing — $DATE $(date +%H:%M)" \
-    --css="" \
-    -V margin-top=20 \
-    -o "$HTML_FILE"
-
-# --- Email as HTML ---
-echo "[$(date)] Sending email..."
-
-{
-    printf "Subject: Daily Briefing — %s %s\n" "$DATE" "$(date +%H:%M)"
-    printf "Content-Type: text/html; charset=UTF-8\n"
-    printf "MIME-Version: 1.0\n"
-    printf "\n"
-    cat "$HTML_FILE"
-} | msmtp "$EMAIL"
-
-echo "[$(date)] Done. Report emailed to $EMAIL"
+echo "=== Splice results ==="
+echo "Signal line:  $(wc -c < "$OUTDIR/signal_line.txt") chars"
+echo "Exec social:  $(wc -c < "$OUTDIR/exec_brief_social.txt") chars"
+echo "Full report:  $(wc -l < "$OUTDIR/full_report.md") lines"
 ```
-
-Make it executable:
 
 ```bash
-chmod +x ~/daily-report.sh
+chmod +x ~/bin/splice-report.sh
 ```
 
-### Test manually
+### Test both scripts
+
+Run them against a generated report to verify they work:
 
 ```bash
-~/daily-report.sh
-```
+# Clean
+~/bin/clean-report.py ~/daily-reports/SOME-REPORT-EN.md > /tmp/cleaned.md
 
-This takes a few minutes. Check your inbox for the formatted HTML report.
+# Splice
+~/bin/splice-report.sh /tmp/cleaned.md /tmp/splice-test/
+
+# Inspect
+cat /tmp/splice-test/signal_line.txt
+head -10 /tmp/splice-test/exec_brief_social.txt
+```
 
 ---
 
-## Phase 8 — Configure GPG Cache for Unattended Operation
+## Phase 9 — Create the Daily Report Script
 
-The GPG agent needs to cache your passphrase long enough to cover periods between logins.
+The main script orchestrates all nine phases. It uses heredoc syntax (`<<'DELIMITER'`)
+for all Claude prompts to avoid bash quoting issues with apostrophes.
+
+Save as `~/daily-report.sh` and make executable with `chmod +x ~/daily-report.sh`.
+
+**Important:** After ANY edit to this script, validate before running:
+
+```bash
+bash -n ~/daily-report.sh && echo "Clean parse" || echo "Syntax error"
+```
+
+`bash -n` parses the script without executing it. It catches unclosed quotes, bad
+heredocs, and syntax errors in one second with zero risk. Run it after every edit.
+
+The script contains:
+- Configuration block (email, paths, variables)
+- GPG agent setup
+- Phase 1-4: Orchestrator prompt (heredoc) → `claude -p` → EN report
+- Phase 5: PT translation prompt (heredoc) → `claude -p` → PT report
+- Phase 6: Cross-reference prompt (heredoc) → `claude -p` → verification table
+- Phase 7: `~/bin/clean-report.py` → cleaned EN report
+- Phase 8: `~/bin/splice-report.sh` → platform-specific slices
+- Phase 9a: Pandoc + msmtp → email
+- Phase 9b: Git push → GitHub Pages archive + index rebuild
+- Phase 9c-e: Social posting functions (`post_bluesky`, `post_mastodon`)
+- Each social channel wrapped in independent error handling
+
+See the actual script at `~/daily-report.sh` for the current implementation.
+A backup of each major version is kept as `~/daily-report.sh.vN-description`.
+
+---
+
+## Phase 10 — Configure GPG Cache for Unattended Operation
+
+The GPG agent needs to cache your passphrase long enough to cover periods between logins. This applies to all GPG-encrypted credentials: Bridge password, BlueSky app password, and Mastodon access token.
 
 ### Set cache duration
 
@@ -479,7 +612,44 @@ echo '~/.local/bin/refresh-gpg-cache.sh' >> ~/.profile
 
 ---
 
-## Phase 9 — Set Up Cron Jobs
+## Phase 11 — Set Up GitHub Pages Archive
+
+### Create repository
+
+```bash
+mkdir -p ~/D-Brief/editions
+cd ~/D-Brief
+git init
+git checkout -b gh-pages
+```
+
+### Add SSH key to GitHub
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub
+# Copy output → github.com/settings/keys → New SSH Key
+```
+
+### Connect and push
+
+```bash
+cd ~/D-Brief
+git remote add origin git@github.com:YOUR_USERNAME/D-Brief.git
+git add -A
+git commit -m "Initial setup"
+git push -u origin gh-pages
+```
+
+### Enable GitHub Pages
+
+Go to your repo → Settings → Pages → Source: Deploy from branch → Branch: gh-pages → Save.
+
+Site will be live at `https://YOUR_USERNAME.github.io/D-Brief/`.
+
+---
+
+## Phase 12 — Set Up Cron Jobs
 
 Open the crontab editor:
 
@@ -491,7 +661,7 @@ If prompted, choose `nano` as the editor. Add these lines at the bottom:
 
 ```
 45 6 * * * export PATH="$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node | tail -1)/bin:$PATH" && $HOME/daily-report.sh >> $HOME/daily-reports/cron.log 2>&1
-45 18 * * * export PATH="$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node | tail -1)/bin:$PATH" && $HOME/daily-report.sh >> $HOME/daily-reports/cron.log 2>&1
+0 21 * * * export PATH="$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node | tail -1)/bin:$PATH" && $HOME/daily-report.sh >> $HOME/daily-reports/cron.log 2>&1
 ```
 
 ### Cron syntax reference
@@ -504,7 +674,7 @@ If prompted, choose `nano` as the editor. Add these lines at the bottom:
 │ │ │ │ ┌─ day of week (0–7, 0 and 7 are Sunday)
 │ │ │ │ │
 45 6 * * *   ← 6:45 AM every day
-45 18 * * *  ← 6:45 PM every day
+0 21 * * *   ← 9:00 PM every day
 ```
 
 The `export PATH=...` segment is necessary because cron runs in a minimal environment that doesn't load nvm. This ensures cron can find the `claude` command.
@@ -524,13 +694,13 @@ crontab -l
 ### Check if cron ran
 
 ```bash
-cat ~/daily-reports/cron.log
+tail -50 ~/daily-reports/cron.log
 ```
 
 ### Check if Bridge is running
 
 ```bash
-ps aux | grep bridge
+pgrep -a protonmail-bridge && echo "Bridge up" || echo "Bridge not running"
 ```
 
 If not running, launch it:
@@ -538,6 +708,8 @@ If not running, launch it:
 ```bash
 protonmail-bridge &
 ```
+
+If already running, don't re-launch — it will show "Instance already exists" and "Failed to launch" which are harmless messages meaning the existing instance is fine.
 
 ### GPG passphrase prompt during cron
 
@@ -568,6 +740,27 @@ openssl x509 -in ~/.config/protonmail/bridge-cert.pem -fingerprint -sha256 -noou
 
 Update the fingerprint in `~/.msmtprc`.
 
+### Social posting failures
+
+Check the cron log for `WARN: BlueSky post failed` or `WARN: Mastodon post failed`.
+
+**BlueSky auth failure:** Verify app password decrypts:
+```bash
+gpg --quiet --for-your-eyes-only --no-tty --decrypt ~/.config/bluesky/app-pass.gpg
+```
+If it fails, the GPG cache expired. Refresh and retry.
+
+**Mastodon auth failure:** Same GPG check for `~/.config/mastodon/token.gpg`.
+
+**Token rotation:** If you suspect a credential is compromised:
+- BlueSky: bsky.app → Settings → App Passwords → delete and recreate
+- Mastodon: Settings → Development → your app → Regenerate token
+Then re-encrypt the new credential.
+
+### bash -n reports a syntax error
+
+This means a quoting issue in the script. Most common cause: an unescaped apostrophe inside a single-quoted string. All Claude prompts should use heredoc syntax (`<<'DELIMITER'`) to avoid this. Check recent edits.
+
 ### Important operational notes
 
 - **Screen lock:** Cron runs fine with the screen locked. The lock screen is only a UI layer; all background services continue running.
@@ -580,9 +773,16 @@ Update the fingerprint in `~/.msmtprc`.
 
 | File | Purpose |
 |------|---------|
-| `~/daily-report.sh` | Main report generation script |
-| `~/daily-reports/` | Generated reports (`.md` and `.html`) |
+| `~/daily-report.sh` | Main report generation + distribution script |
+| `~/daily-report.sh.vN-*` | Versioned backups of the script |
+| `~/bin/clean-report.py` | Phase 7 — strip Claude meta-commentary |
+| `~/bin/splice-report.sh` | Phase 8 — extract platform-specific slices |
+| `~/daily-reports/` | Generated reports (.md, .html) + splice dirs |
 | `~/daily-reports/cron.log` | Cron job output log |
+| `~/daily-reports/splice-YYYY-MM-DD-HHMM/` | Spliced outputs per run |
+| `~/D-Brief/` | GitHub Pages repo (gh-pages branch) |
+| `~/D-Brief/editions/YYYY-MM-DD/` | Archived editions (index.html + pt.html) |
+| `~/D-Brief/index.html` | Archive front page (auto-rebuilt each run) |
 | `~/.claude/skills/` | Installed Claude Code skills |
 | `~/.claude/settings.json` | Claude Code permissions |
 | `~/.msmtprc` | msmtp email configuration |
@@ -590,9 +790,12 @@ Update the fingerprint in `~/.msmtprc`.
 | `~/.config/protonmail/bridge-cert.pem` | Bridge TLS certificate |
 | `~/.config/protonmail/bridge-pass.gpg` | Encrypted Bridge password |
 | `~/.config/protonmail/.gpg-cache-timestamp` | Tracks last GPG cache refresh |
+| `~/.config/bluesky/app-pass.gpg` | Encrypted BlueSky app password |
+| `~/.config/mastodon/token.gpg` | Encrypted Mastodon access token |
 | `~/.config/autostart/gpg-cache.desktop` | Desktop login GPG refresh trigger |
 | `~/.local/bin/refresh-gpg-cache.sh` | GPG cache refresh script |
+| `~/.ssh/id_ed25519` | SSH key for GitHub push |
 
 ---
 
-*Document generated April 15, 2026. Covers the complete setup from bare Linux system to automated daily briefing delivery.*
+*Document updated April 16, 2026. Covers the complete setup from bare Linux system to automated multi-platform daily briefing delivery.*
